@@ -1,325 +1,47 @@
+# Use the latest 2.1 version of CircleCI pipeline process engine.
+# See: https://circleci.com/docs/2.0/configuration-reference
 version: 2.1
 
-parameters:
-  # A parameter per package
-  pipeline_workflows:
-    type: boolean
-    default: false
-  ekstep_data_pipelines:
-    type: boolean
-    default: true
+# Orbs are reusable packages of CircleCI configuration that you may share across projects, enabling you to create encapsulated, parameterized commands, jobs, and executors that can be used across multiple projects.
+# See: https://circleci.com/docs/2.0/orb-intro/
+orbs:
+  # The python orb contains a set of prepackaged CircleCI configuration you can use repeatedly in your configuration files
+  # Orb commands and jobs help you with common scripting around a language/tool
+  # so you dont have to copy and paste it everywhere.
+  # See the orb documentation here: https://circleci.com/developer/orbs/orb/circleci/python
+  python: circleci/python@1.5.0
 
-executors:
-  node:
-    docker:
-      - image: circleci/python:3.8.6
-
+# Define a job to be invoked later in a workflow.
+# See: https://circleci.com/docs/2.0/configuration-reference/#jobs
 jobs:
-  build-dags:
-    parameters:
-      package_name:
-        type: string
-      env_name:
-        type: string
-    machine:
-      image: ubuntu-2004:2022.10.1
-    working_directory: ~/project/packages/pipeline_workflows
-    steps:
-      - checkout:
-          path: ~/project
-      - run:
-          name: Build Image
-          command: |
-            ls -ltr . ; pwd
-      - run:
-          name: Deploy Pipeline Workflow DAG
-          command: |
-            echo ${GOOGLE_AUTH} > ${HOME}/gcp-key.json
-            gcloud auth activate-service-account --key-file ${HOME}/gcp-key.json
-            gcloud --quiet config set project ${GCP_PROJECT}
-            sh ~/project/packages/pipeline_workflows/deployDAG.sh << parameters.env_name >>
-            rm ${HOME}/gcp-key.json
-
-  build:
-    parameters:
-      package_name:
-        type: string
-
-    executor: node
-    working_directory: ~/project/packages/<< parameters.package_name >>
-
-    steps:
-      - checkout:
-          path: ~/project
-      # This step is added only to show that we are in the package directory
-      - run:
-          name: Sanity check to confirm correct package directory
-          command: echo "Current package directory is << parameters.package_name >> ..."
-      - run:
-          name: Setup Testing Environment
-          command: |
-            python --version ; pip --version ; pwd ; ls
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg
-            sudo apt-get install -y sox
-            sudo apt-get install -y gcc-multilib g++-multilib
-            sudo apt-get install libpq-dev
-            pip install --upgrade pip
-            pip install -r requirements.txt
-            python --version ; pip --version ; pwd ; ls
-      # - run:
-      #     name: Run Tests
-      #     command: |
-      #       coverage run -m unittest discover src/tests
-      #       coverage report --fail-under 20  src/scripts/*.py
-      #       coverage html  # open htmlcov/index.html in a browser
-      # - store_artifacts:
-      #     path: htmlcov
-      - persist_to_workspace:
-          root: ~/project
-          paths:
-            - packages/<< parameters.package_name >>
-
-  ekstep_build:
-
-    executor: node
-    working_directory: ~/project/packages
-
-    steps:
-      - checkout:
-          path: ~/project
-      # This step is added only to show that we are in the package directory
-      - run:
-          name: Setup Testing Environment
-          command: |
-            python --version ; pip --version ; pwd ; ls
-            sudo apt-get update --allow-releaseinfo-change
-            sudo apt-get install -y ffmpeg
-            sudo apt-get install -y sox
-            sudo apt-get install -y gcc-multilib g++-multilib
-            sudo apt-get install libpq-dev
-            pip install --upgrade pip
-            pip install -r requirements.txt
-            python --version ; pip --version ; pwd ; ls
-      - run:
-          name: Generate Linting Report
-          command: |
-            set +e
-            mkdir -p linting_report
-            pylint `pwd`  --exit-zero > linting_report/linting_report_.txt
-      - store_artifacts:
-          path: linting_report
-      # - run:
-      #     name: Run Tests
-      #     command: |
-      #       coverage run -m unittest discover -s ekstep_pipelines_tests/ -p "*_tests.py" -v
-      #       #coverage report --fail-under 65
-      #       coverage html
-      #       echo 'open htmlcov/index.html in a browser from circleci artifacts'
-      # - store_artifacts:
-      #     path: htmlcov
-      - persist_to_workspace:
-          root: ~/project
-          paths:
-            - packages
-  deploy:
-    parameters:
-      package_version:
-        type: string
-      env_name:
-        type: string
-    #    executor: node
-    machine:
-      image: ubuntu-2004:2022.10.1
-    working_directory: ~/project/packages
-
-    steps:
-      - attach_workspace:
-          at: ~/project
-      # This step is added to show that files are available from the build job.
-      - run:
-          name: Content to deploy
-          command: ls
-      - deploy:
-          name: Build and Deploy Image
-          command: |
-            echo ${GOOGLE_AUTH} > ${HOME}/gcp-key.json
-            gcloud auth activate-service-account --key-file ${HOME}/gcp-key.json
-            gcloud --quiet config set project ${GCP_PROJECT}
-            if [[ << parameters.env_name >> == "test" ]]; then
-              echo "Build ..."
-              docker build --rm=false -t us.gcr.io/${GCP_PROJECT}/ekstep_data_pipelines:<< parameters.package_version >> -t us.gcr.io/${GCP_PROJECT}/ekstep_data_pipelines:<< parameters.env_name >>_<< parameters.package_version >> .
-            else
-             gcloud docker -- pull us.gcr.io/${GCP_PROJECT}/ekstep_data_pipelines:<< parameters.package_version >>
-             echo "Tag ekstep_data_pipelines ... with << parameters.env_name >>"
-             docker tag us.gcr.io/${GCP_PROJECT}/ekstep_data_pipelines:<< parameters.package_version >> us.gcr.io/${GCP_PROJECT}/ekstep_data_pipelines:<< parameters.env_name >>_<< parameters.package_version >>
-            fi
-            gcloud docker -- push us.gcr.io/${GCP_PROJECT}/ekstep_data_pipelines
-      - run:
-          name: Remove account details
-          command: rm ${HOME}/gcp-key.json ; ls
-  approval_for_prod_deploy:
+  build-and-test: # This is the name of the job, feel free to change it to better match what you're trying to do!
+    # These next lines defines a Docker executors: https://circleci.com/docs/2.0/executor-types/
+    # You can specify an image from Dockerhub or use one of the convenience images from CircleCI's Developer Hub
+    # A list of available CircleCI Docker convenience images are available here: https://circleci.com/developer/images/image/cimg/python
+    # The executor is the environment in which the steps below will be executed - below will use a python 3.10.2 container
+    # Change the version below to your required version of python
     docker:
-      - image: circleci/node:4.8.2
+      - image: cimg/python:3.10.2
+    # Checkout the code as the first step. This is a dedicated CircleCI step.
+    # The python orb's install-packages step will install the dependencies from a Pipfile via Pipenv by default.
+    # Here we're making sure we use just use the system-wide pip. By default it uses the project root's requirements.txt.
+    # Then run your tests!
+    # CircleCI will report the results back to your VCS provider.
     steps:
-      - run: echo "Hold for approval"
-
-  E2E:
-    working_directory: ~/E2E
-
-    docker:
-      - image: circleci/openjdk:8-jdk-stretch
-        environment:
-          POSTGRES_USER: $POSTGRES_USER
-          POSTGRES_PASSWORD: $POSTGRES_PASSWORD
-
-    steps:
-      - checkout:
-          path: ~/project
+      - checkout
+      - python/install-packages:
+          pkg-manager: pip
+          # app-dir: ~/project/package-directory/  # If you're requirements.txt isn't in the root directory.
+          # pip-dependency-file: test-requirements.txt  # if you have a different name for your requirements file, maybe one that combines your runtime and test requirements.
       - run:
-          name: E2E Tests
-          command: |
-            mkdir -p ~/.ssh
+          name: Run tests
+          # This assumes pytest is installed via the install-package step above
+          command: pytest
 
-            echo ${SSH} > ~/.ssh/known_hosts
-
-            cat ~/.ssh/known_hosts
-
-            git clone git@github.com:Open-Speech-EkStep/E2ETest.git
-            pwd
-            cd ${HOME}
-            wget https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-265.0.0-linux-x86_64.tar.gz
-            tar -zxf google-cloud-sdk-*
-            cd google-cloud-sdk
-            pwd
-            ./install.sh --quiet
-            echo ${GOOGLE_AUTH} > ${HOME}/gcp-key.json
-            ./bin/gcloud auth activate-service-account --key-file ${HOME}/gcp-key.json
-            ./bin/gcloud --quiet config set project ${GCP_PROJECT}
-            export GOOGLE_APPLICATION_CREDENTIALS=${HOME}/gcp-key.json
-            echo $GOOGLE_APPLICATION_CREDENTIALS
-            wget https://dl.google.com/cloudsql/cloud_sql_proxy.linux.amd64 -O cloud_sql_proxy
-            chmod +x cloud_sql_proxy
-            nohup ./cloud_sql_proxy -dir=./cloudsql -instances=ekstepspeechrecognition:us-central1:crowdsourcedb=tcp:5432 &
-            sleep 25s
-            cat nohup.out
-            cd ~/E2E/E2ETest
-            pwd
-            ls
-            mvn dependency:go-offline
-            mvn package
-
-  deploy-db:
-    parameters:
-      mode:
-        type: string
-      env_name:
-        type: string
-    working_directory: ~/project/
-
-    docker:
-      - image: circleci/python:3.8.6
-        environment:
-          POSTGRES_USER: $POSTGRES_USER
-          POSTGRES_PASSWORD: $POSTGRES_PASSWORD
-
-    steps:
-      - checkout:
-          path: ~/project
-      - run:
-          name: Setup proxy for psql and environment
-          command: |
-            mkdir -p ~/.ssh
-            echo ${SSH} > ~/.ssh/known_hosts
-            cat ~/.ssh/known_hosts
-            cd ${HOME}
-            wget https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-265.0.0-linux-x86_64.tar.gz
-            tar -zxf google-cloud-sdk-*
-            cd google-cloud-sdk
-            pwd
-            ./install.sh --quiet
-            echo ${GOOGLE_AUTH} > ${HOME}/gcp-key.json
-            ./bin/gcloud auth activate-service-account --key-file ${HOME}/gcp-key.json
-            ./bin/gcloud --quiet config set project ${GCP_PROJECT}
-            export GOOGLE_APPLICATION_CREDENTIALS=${HOME}/gcp-key.json
-            echo $GOOGLE_APPLICATION_CREDENTIALS
-            wget https://dl.google.com/cloudsql/cloud_sql_proxy.linux.amd64 -O cloud_sql_proxy
-            chmod +x cloud_sql_proxy
-            nohup ./cloud_sql_proxy -dir=./cloudsql -instances=${GCP_PROJECT}:us-central1:${DB_INSTANCE}=tcp:5432 &
-            sleep 25s
-            cat nohup.out
-            pip install yoyo-migrations
-            pip install psycopg2
-      - run:
-          name: Update migrations
-          command: |
-            ls ./migrations
-            echo " The mode is << parameters.mode >>"
-            export env_name=_<< parameters.env_name >>
-            if [[ $env_name == "_prod" ]]
-            then
-              export env_name=''
-            fi
-            yoyo << parameters.mode >> --database postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost/${POSTGRES_DB} --all -b ./migrations
-
+# Invoke jobs via workflows
+# See: https://circleci.com/docs/2.0/configuration-reference/#workflows
 workflows:
-  version: 2
-
-  # Workflows defined for each package.
-
-  ekstep_data_pipelines:
+  sample: # This is the name of the workflow, feel free to change it to better match your workflow.
+    # Inside the workflow, you define the jobs you want to run.
     jobs:
-      - ekstep_build:
-          name: ekstep_data_pipelines_build
-      - deploy:
-          name: ekstep_data_pipelines_deploy_test
-          env_name: test
-          package_version: 1.0.0
-          requires:
-            - ekstep_data_pipelines_build
-      - deploy-db:
-          name: ekstep-database-migrations-apply-test
-          mode: 'apply'
-          env_name: 'test'
-          requires:
-            - ekstep_data_pipelines_deploy_test
-      - build-dags:
-          name: pipeline-dag-build_test
-          package_name: pipeline_workflows
-          env_name: 'test'
-          requires:
-            - ekstep-database-migrations-apply-test
-      - E2E:
-          name: ekstep_data_pipelines_e2e_build
-          requires:
-            - pipeline-dag-build_test
-      - approval_for_prod_deploy:
-          type: approval
-          requires:
-            - ekstep_data_pipelines_e2e_build
-      - deploy:
-          name: ekstep_data_pipelines_deploy_prod
-          env_name: prod
-          package_version: 1.0.0
-          requires:
-            - approval_for_prod_deploy
-      - deploy-db:
-          name: ekstep-database-migrations-apply-prod
-          mode: 'apply'
-          env_name: 'prod'
-          requires:
-            - ekstep_data_pipelines_deploy_prod
-      - approval_for_prod_deploy:
-          name: approval-for-prod-dag-deploy
-          type: approval
-          requires:
-            - ekstep_data_pipelines_deploy_prod
-      - build-dags:
-          name: pipeline-dag-build_prod
-          package_name: pipeline_workflows
-          env_name: 'prod'
-          requires:
-            - ekstep-database-migrations-apply-prod
-            - approval-for-prod-dag-deploy
-
-
+      - build-and-test
